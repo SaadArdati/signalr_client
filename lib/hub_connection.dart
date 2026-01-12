@@ -59,6 +59,7 @@ typedef MethodInvocationFunc = void Function(List<Object?>? arguments);
 typedef ClosedCallback = void Function({Exception? error});
 typedef ReconnectingCallback = void Function({Exception? error});
 typedef ReconnectedCallback = void Function({String? connectionId});
+typedef PingCallback = void Function();
 
 /// Represents a connection to a SignalR Hub
 class HubConnection {
@@ -77,6 +78,9 @@ class HubConnection {
   late List<ClosedCallback> _closedCallbacks;
   late List<ReconnectingCallback> _reconnectingCallbacks;
   late List<ReconnectedCallback> _reconnectedCallbacks;
+  late List<PingCallback> _onPingSentCallbacks;
+  late List<PingCallback> _onPingReceivedCallbacks;
+  Completer<void>? _healthCheckCompleter;
 
   late bool _receivedHandshakeResponse;
   Completer? _handshakeCompleter;
@@ -172,6 +176,8 @@ class HubConnection {
     _closedCallbacks = [];
     _reconnectingCallbacks = [];
     _reconnectedCallbacks = [];
+    _onPingSentCallbacks = [];
+    _onPingReceivedCallbacks = [];
     _invocationId = 0;
     _receivedHandshakeResponse = false;
     _hubConnectionStateMaintainer =
@@ -551,8 +557,75 @@ class HubConnection {
     _reconnectedCallbacks.add(callback);
   }
 
+  /// Registers a handler that will be invoked when a ping message is sent to the server.
+  ///
+  /// callback: The handler that will be invoked when a ping message is sent.
+  ///
+  void onPingSent(PingCallback callback) {
+    _onPingSentCallbacks.add(callback);
+  }
+
+  /// Registers a handler that will be invoked when a ping message is received from the server.
+  ///
+  /// callback: The handler that will be invoked when a ping message is received.
+  ///
+  void onPingReceived(PingCallback callback) {
+    _onPingReceivedCallbacks.add(callback);
+  }
+
+  /// Checks if the connection is healthy by sending a ping and waiting for any response.
+  ///
+  /// This is useful after an app resumes from background to verify the connection
+  /// is still alive before attempting to use it.
+  ///
+  /// [timeout]: How long to wait for a response. Defaults to 2 seconds.
+  ///
+  /// Returns true if the connection is healthy (received any response),
+  /// false if the ping failed to send or no response was received within the timeout.
+  ///
+  Future<bool> checkHealth({Duration timeout = const Duration(seconds: 2)}) async {
+    if (_connectionState != HubConnectionState.Connected) {
+      _logger?.finer("checkHealth: Not connected, returning false");
+      return false;
+    }
+
+    _healthCheckCompleter = Completer<void>();
+
+    try {
+      // Try to send a ping
+      _logger?.finer("checkHealth: Sending ping");
+      await _sendMessage(_cachedPingMessage);
+      _logger?.finer("checkHealth: Ping sent, waiting for response");
+
+      // Wait for any response or timeout
+      await _healthCheckCompleter!.future.timeout(
+        timeout,
+        onTimeout: () {
+          _logger?.finer("checkHealth: Timeout waiting for response");
+          throw TimeoutException('Health check timeout');
+        },
+      );
+
+      _logger?.finer("checkHealth: Received response, connection healthy");
+      return true;
+    } on TimeoutException {
+      _logger?.warning("checkHealth: Connection appears dead (timeout)");
+      return false;
+    } catch (e) {
+      _logger?.warning("checkHealth: Connection appears dead (error: $e)");
+      return false;
+    } finally {
+      _healthCheckCompleter = null;
+    }
+  }
+
   void _processIncomingData(Object? data) {
     _cleanupTimeout();
+
+    // Complete any pending health check - we received data so connection is alive
+    if (_healthCheckCompleter != null && !_healthCheckCompleter!.isCompleted) {
+      _healthCheckCompleter!.complete();
+    }
 
     if (!_receivedHandshakeResponse) {
       data = _processHandshakeResponse(data);
@@ -583,7 +656,12 @@ class HubConnection {
             }
             break;
           case MessageType.Ping:
-            // Don't care about pings
+            _logger?.finest("Ping message received from server.");
+            try {
+              _onPingReceivedCallbacks.forEach((c) => c());
+            } catch (e) {
+              _logger?.severe("An onPingReceived callback threw error '$e'.");
+            }
             break;
           case MessageType.Close:
             _logger?.info("Close message received from server.");
@@ -662,6 +740,12 @@ class HubConnection {
       if (_connectionState == HubConnectionState.Connected) {
         try {
           await _sendMessage(_cachedPingMessage);
+          _logger?.finest("Ping message sent to server.");
+          try {
+            _onPingSentCallbacks.forEach((c) => c());
+          } catch (e) {
+            _logger?.severe("An onPingSent callback threw error '$e'.");
+          }
         } catch (e) {
           // We don't care about the error. It should be seen elsewhere in the client.
           // The connection is probably in a bad or closed state now, cleanup the timer so it stops triggering

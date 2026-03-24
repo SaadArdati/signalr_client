@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:logging/logging.dart';
 
-import 'default_reconnect_policy.dart';
 import 'errors.dart';
 import 'handshake_protocol.dart';
 import 'iconnection.dart';
@@ -12,6 +11,8 @@ import 'utils.dart';
 
 const int DEFAULT_TIMEOUT_IN_MS = 30 * 1000;
 const int DEFAULT_PING_INTERVAL_IN_MS = 15 * 1000;
+const int DEFAULT_HANDSHAKE_TIMEOUT_IN_MS = 15 * 1000;
+const int DEFAULT_CONNECT_TIMEOUT_IN_MS = 10 * 1000;
 
 /// internal class to wrap emitting events once the {@link HubConnectionState} changes.
 class _HubConnectionStateMaintainer {
@@ -67,12 +68,13 @@ class HubConnection {
   Object? _cachedPingMessage;
   final IConnection _connection;
   final Logger? _logger;
-  final IRetryPolicy _reconnectPolicy;
+  final IRetryPolicy? _reconnectPolicy;
   final IHubProtocol _protocol;
   final HandshakeProtocol _handshakeProtocol;
 
   late Map<String?, InvocationEventCallback> _callbacks;
   late Map<String, List<MethodInvocationFunc>> _methods;
+  final Set<String> _receivedMethods = {};
   int? _invocationId;
 
   late List<ClosedCallback> _closedCallbacks;
@@ -120,6 +122,22 @@ class HubConnection {
   ///
   late int keepAliveIntervalInMilliseconds;
 
+  /// Timeout in milliseconds for the handshake to complete after connection is established.
+  ///
+  /// If the handshake does not complete within this timeout, the connection will be terminated.
+  /// The default timeout value is 15,000 milliseconds (15 seconds), matching:
+  /// - C#: https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L52
+  /// - Java: https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/java/signalr/core/src/main/java/com/microsoft/signalr/HubConnection.java#L57
+  ///
+  late int handshakeTimeoutInMilliseconds;
+
+  /// Timeout in milliseconds for the initial transport connection to be established.
+  ///
+  /// If the transport cannot connect within this timeout, start() will fail.
+  /// The default timeout value is 10,000 milliseconds (10 seconds).
+  ///
+  late int connectTimeoutInMilliseconds;
+
   /// Indicates the state of the {@link HubConnection} to the server.
   HubConnectionState? get state => _connectionState;
 
@@ -163,10 +181,12 @@ class HubConnection {
       : _connection = connection,
         _logger = logger,
         _protocol = protocol,
-        _reconnectPolicy = reconnectPolicy ?? DefaultRetryPolicy(),
+        _reconnectPolicy = reconnectPolicy,
         _handshakeProtocol = HandshakeProtocol() {
     serverTimeoutInMilliseconds = DEFAULT_TIMEOUT_IN_MS;
     keepAliveIntervalInMilliseconds = DEFAULT_PING_INTERVAL_IN_MS;
+    handshakeTimeoutInMilliseconds = DEFAULT_HANDSHAKE_TIMEOUT_IN_MS;
+    connectTimeoutInMilliseconds = DEFAULT_CONNECT_TIMEOUT_IN_MS;
 
     _connection.onreceive = _processIncomingData;
     _connection.onclose = _connectionClosed;
@@ -224,7 +244,26 @@ class HubConnection {
     _receivedHandshakeResponse = false;
     // Set up the promise before any connection is (re)started otherwise it could race with received messages
     _handshakeCompleter = Completer();
-    await _connection.start(transferFormat: _protocol.transferFormat);
+
+    // H1 FIX: Wrap transport connect with a timeout to prevent indefinite hangs
+    // on unresponsive servers.
+    // TS client: 100s default — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/ts/signalr/src/HttpConnection.ts#L84
+    // C# client: CancellationToken propagation — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L1511
+    try {
+      await _connection
+          .start(transferFormat: _protocol.transferFormat)
+          .timeout(
+        Duration(milliseconds: connectTimeoutInMilliseconds),
+        onTimeout: () {
+          throw TimeoutException(
+              'Transport connection timed out after ${connectTimeoutInMilliseconds}ms.',
+              Duration(milliseconds: connectTimeoutInMilliseconds));
+        },
+      );
+    } on TimeoutException catch (e) {
+      _logger?.severe("Connection timed out: $e");
+      rethrow;
+    }
 
     try {
       final handshakeRequest =
@@ -242,7 +281,17 @@ class HubConnection {
       _resetTimeoutPeriod();
       _resetKeepAliveInterval();
 
-      await _handshakeCompleter!.future;
+      // H2 FIX: Use a dedicated handshake timeout (15s default) instead of relying on the 30s server timeout.
+      // C# client: HandshakeTimeout = 15s — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L52
+      // Java client: handshakeResponseTimeout = 15s — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/java/signalr/core/src/main/java/com/microsoft/signalr/HubConnection.java#L57
+      await _handshakeCompleter!.future.timeout(
+        Duration(milliseconds: handshakeTimeoutInMilliseconds),
+        onTimeout: () {
+          throw TimeoutException(
+              'Server handshake timed out after ${handshakeTimeoutInMilliseconds}ms.',
+              Duration(milliseconds: handshakeTimeoutInMilliseconds));
+        },
+      );
 
       // It's important to check the stopDuringStartError instead of just relying on the handshakePromise
       // being rejected on close, because this continuation can run after both the handshake completed successfully
@@ -500,6 +549,13 @@ class HubConnection {
     _methods[methodName]!.add(newMethod);
   }
 
+  /// Returns a list of all method names that have registered handlers.
+  List<String> get registeredMethods => _methods.keys.toList();
+
+  /// Returns a set of all method names received from the server,
+  /// regardless of whether a handler was registered.
+  Set<String> get receivedMethods => Set.unmodifiable(_receivedMethods);
+
   /// Removes the specified handler for the specified hub method.
   ///
   /// You must pass the exact same Function instance as was previously passed to HubConnection.on. Passing a different instance (even if the function
@@ -733,10 +789,15 @@ class HubConnection {
   }
 
   void _resetKeepAliveInterval() {
+    // H5 FIX: Use one-shot Timer instead of Timer.periodic.
+    // Timer.periodic fires all accumulated callbacks after device sleep/wake
+    // (https://github.com/dart-lang/sdk/issues/23487), causing stacked timeout events.
+    // TS client uses setTimeout (one-shot): https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/ts/signalr/src/HubConnection.ts#L722
+    // C# client uses 1s polling timer: https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L164
     _cleanupPingTimer();
     _pingServerTimer =
-        Timer.periodic(Duration(milliseconds: keepAliveIntervalInMilliseconds),
-            (Timer t) async {
+        Timer(Duration(milliseconds: keepAliveIntervalInMilliseconds),
+            () async {
       if (_connectionState == HubConnectionState.Connected) {
         try {
           await _sendMessage(_cachedPingMessage);
@@ -756,17 +817,20 @@ class HubConnection {
   }
 
   void _resetTimeoutPeriod() {
+    // H5 FIX: Use one-shot Timer instead of Timer.periodic (see keepalive comment above for links).
+    // A one-shot timer fires exactly once and cannot stack after sleep.
+    // Re-scheduled on every received message via _processIncomingData → _resetTimeoutPeriod.
     _cleanupTimeout();
     if ((_connection.features == null) ||
         (_connection.features!.inherentKeepAlive == null) ||
         (!_connection.features!.inherentKeepAlive!)) {
-      // Set the timeout timer
-      _timeoutTimer = Timer.periodic(
+      // Set the timeout timer (one-shot — re-created on next received message)
+      _timeoutTimer = Timer(
           Duration(milliseconds: serverTimeoutInMilliseconds), _serverTimeout);
     }
   }
 
-  void _serverTimeout(Timer t) {
+  void _serverTimeout() {
     // The server hasn't talked to us in a while. It doesn't like us anymore ... :(
     // Terminate the connection, but we don't need to wait on the promise.
     _connection.stop(
@@ -775,6 +839,7 @@ class HubConnection {
   }
 
   void _invokeClientMethod(InvocationMessage invocationMessage) {
+    _receivedMethods.add(invocationMessage.target!);
     final methods = _methods[invocationMessage.target!.toLowerCase()];
     if (methods != null) {
       methods.forEach((m) => m(invocationMessage.arguments));
@@ -818,9 +883,15 @@ class HubConnection {
 
     if (_connectionState == HubConnectionState.Disconnecting) {
       _completeClose(error: error);
-    } else if (_connectionState == HubConnectionState.Connected) {
+    } else if (_connectionState == HubConnectionState.Connected &&
+        _reconnectPolicy != null) {
+      // H4 FIX: Only enter _reconnect if a reconnect policy is configured.
+      // TS client checks `this._reconnectPolicy`: https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/ts/signalr/src/HubConnection.ts#L837
+      // Previously, this always entered _reconnect() and the third branch
+      // (Connected without policy → close) was dead code due to duplicate condition.
       _reconnect(error: error);
     } else if (_connectionState == HubConnectionState.Connected) {
+      // No reconnect policy — close directly without reconnect attempt
       _completeClose(error: error);
     }
 
@@ -897,7 +968,20 @@ class HubConnection {
       }
 
       try {
-        await _startInternal();
+        // H3 FIX: Wrap each reconnect attempt with a per-attempt timeout.
+        // This is a safety-net timeout. Under normal operation, the inner H1
+        // connect timeout and H2 handshake timeout will fire first. This outer
+        // timeout catches cases where the inner timeouts somehow fail to throw.
+        final perAttemptTimeout =
+            connectTimeoutInMilliseconds + handshakeTimeoutInMilliseconds;
+        await _startInternal().timeout(
+          Duration(milliseconds: perAttemptTimeout),
+          onTimeout: () {
+            throw TimeoutException(
+                'Reconnect attempt timed out after ${perAttemptTimeout}ms.',
+                Duration(milliseconds: perAttemptTimeout));
+          },
+        );
 
         _connectionState = HubConnectionState.Connected;
         _logger?.info("HubConnection reconnected successfully.");
@@ -913,6 +997,22 @@ class HubConnection {
         return;
       } catch (e) {
         _logger?.info("Reconnect attempt failed because of error '$e'.");
+
+        // C1 FIX: Stop the transport to prevent orphaned connections from
+        // timed-out attempts. Dart's .timeout() does NOT cancel the underlying
+        // Future — the transport may still be connecting in the background.
+        // Without this, N timed-out attempts = N concurrent transport connections.
+        //
+        // NOTE: _connection.stop() will trigger onclose → _connectionClosed.
+        // Since _connectionState is Reconnecting, _connectionClosed will
+        // fall through without calling _reconnect or _completeClose (see
+        // the comment at line ~900). This is safe because _startInternal
+        // already threw, so the handshake completer is no longer awaited.
+        try {
+          await _connection.stop();
+        } catch (_) {
+          // Ignore stop errors during reconnect cleanup
+        }
 
         if (_connectionState != HubConnectionState.Reconnecting) {
           _logger?.finer(
@@ -937,7 +1037,7 @@ class HubConnection {
   int? _getNextRetryDelay(
       int previousRetryCount, int elapsedMilliseconds, Exception retryReason) {
     try {
-      return _reconnectPolicy.nextRetryDelayInMilliseconds(
+      return _reconnectPolicy!.nextRetryDelayInMilliseconds(
           RetryContext(elapsedMilliseconds, previousRetryCount, retryReason));
     } catch (e) {
       _logger?.severe(

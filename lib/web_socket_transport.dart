@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
-import 'dart:io' as io;
+import 'package:universal_io/io.dart' as io;
 
 import 'package:logging/logging.dart';
 import 'package:signalr_netcore/ihub_protocol.dart';
@@ -29,12 +29,16 @@ class WebSocketTransport implements ITransport {
   OnReceive? onReceive;
 
   // Methods
+  final io.CompressionOptions? _compressionOptions;
+
   WebSocketTransport(AccessTokenFactory? accessTokenFactory, Logger? logger,
-      bool logMessageContent, MessageHeaders? headers)
+      bool logMessageContent, MessageHeaders? headers,
+      {io.CompressionOptions? compressionOptions})
       : _accessTokenFactory = accessTokenFactory,
         _logger = logger,
         _logMessageContent = logMessageContent,
-        _headers = headers;
+        _headers = headers,
+        _compressionOptions = compressionOptions;
 
   @override
   Future<void> connect(String? url, TransferFormat transferFormat) async {
@@ -67,7 +71,10 @@ class WebSocketTransport implements ITransport {
       if (kIsWeb) {
         _webSocket = WebSocketChannel.connect(Uri.parse(url));
       } else {
-        final webSocket = await io.WebSocket.connect(url, headers: headers);
+        final webSocket = await io.WebSocket.connect(url,
+            headers: headers,
+            compression:
+                _compressionOptions ?? io.CompressionOptions.compressionOff);
         _webSocket = IOWebSocketChannel(webSocket);
       }
       opened = true;

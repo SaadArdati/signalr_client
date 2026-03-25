@@ -283,7 +283,8 @@ void main() {
       expect(isHealthy, isTrue);
     });
 
-    test('checkHealth returns false when connection is dead (timeout)', () async {
+    test('checkHealth returns false when connection is dead (timeout)',
+        () async {
       await hubConnection.start();
       expect(hubConnection.state, equals(HubConnectionState.Connected));
 

@@ -19,7 +19,8 @@ class ZombieTestConnection extends IConnection {
   // Zombie state controls
   bool simulateSendFailure = false;
   bool simulateSendHangs = false;
-  bool simulateServerGone = false;  // Server closed connection but client doesn't know
+  bool simulateServerGone =
+      false; // Server closed connection but client doesn't know
   bool simulateSlowSend = false;
   int sendDelayMs = 0;
 
@@ -44,7 +45,7 @@ class ZombieTestConnection extends IConnection {
     if (simulateSendHangs) {
       eventLog.add('send hanging indefinitely');
       _hangingCompleter = Completer<void>();
-      await _hangingCompleter!.future;  // Never completes
+      await _hangingCompleter!.future; // Never completes
       return;
     }
 
@@ -106,7 +107,6 @@ class ZombieTestConnection extends IConnection {
     }
   }
 }
-
 
 void main() {
   group('Zombie State Diagnostics ->', () {
@@ -291,7 +291,8 @@ void main() {
         }
       });
 
-      test('server sends handshake but then dies before first message', () async {
+      test('server sends handshake but then dies before first message',
+          () async {
         await hubConnection.start();
         expect(hubConnection.state, equals(HubConnectionState.Connected));
 
@@ -316,13 +317,28 @@ void main() {
         // Start multiple sends and collect errors
         var errors = 0;
 
-        try { await hubConnection.send('Method1'); } catch (e) { errors++; print('Send1 error: $e'); }
-        try { await hubConnection.send('Method2'); } catch (e) { errors++; print('Send2 error: $e'); }
+        try {
+          await hubConnection.send('Method1');
+        } catch (e) {
+          errors++;
+          print('Send1 error: $e');
+        }
+        try {
+          await hubConnection.send('Method2');
+        } catch (e) {
+          errors++;
+          print('Send2 error: $e');
+        }
 
         // Kill connection mid-send
         mockConnection.simulateSendFailure = true;
 
-        try { await hubConnection.send('Method3'); } catch (e) { errors++; print('Send3 error: $e'); }
+        try {
+          await hubConnection.send('Method3');
+        } catch (e) {
+          errors++;
+          print('Send3 error: $e');
+        }
 
         print('Event log: ${mockConnection.eventLog}');
         print('Send errors: $errors out of 3');
@@ -437,7 +453,8 @@ void main() {
     });
 
     group('Zombie State 6: Background/Foreground simulation ->', () {
-      test('simulated backgrounding kills connection, foregrounding reconnects', () async {
+      test('simulated backgrounding kills connection, foregrounding reconnects',
+          () async {
         var reconnectCount = 0;
         var stateChanges = <HubConnectionState>[];
 

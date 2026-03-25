@@ -67,8 +67,7 @@ class LatencyTestConnection extends IConnection {
       _handshakeResponseSent = true;
       if (!suppressHandshakeResponse) {
         Timer.run(() {
-          final handshakeResponse =
-              '{}${TextMessageFormat.recordSeparator}';
+          final handshakeResponse = '{}${TextMessageFormat.recordSeparator}';
           onreceive?.call(handshakeResponse);
         });
       }
@@ -266,8 +265,8 @@ void main() {
       hubConnection.onPingSent(() => pingCount++);
 
       // Keep the server "alive" by sending periodic data
-      mockConnection.receiveData(
-          '{"type":6}${TextMessageFormat.recordSeparator}');
+      mockConnection
+          .receiveData('{"type":6}${TextMessageFormat.recordSeparator}');
 
       await Future.delayed(Duration(milliseconds: 150));
 
@@ -360,7 +359,8 @@ void main() {
   // and close. The Dart port lost this check, making the third branch dead code.
   // ===========================================================================
 
-  group('H4: Dead code in _connectionClosed (missing reconnectPolicy check) ->', () {
+  group('H4: Dead code in _connectionClosed (missing reconnectPolicy check) ->',
+      () {
     late LatencyTestConnection mockConnection;
 
     tearDown(() async {
@@ -369,7 +369,8 @@ void main() {
 
     test(
         'HubConnection created WITHOUT explicit reconnectPolicy should NOT '
-        'auto-reconnect — but Dart always defaults to DefaultRetryPolicy', () async {
+        'auto-reconnect — but Dart always defaults to DefaultRetryPolicy',
+        () async {
       // WHAT THIS TESTS:
       // TS client: not calling withAutomaticReconnect() → _reconnectPolicy = undefined
       //   → connectionClosed from Connected state → _completeClose (no reconnect)
@@ -412,8 +413,7 @@ void main() {
       stateTransitions.clear();
 
       // Simulate server disconnect
-      mockConnection.triggerClose(
-          error: Exception('Server disconnected'));
+      mockConnection.triggerClose(error: Exception('Server disconnected'));
 
       // Wait for reconnection logic to kick in
       await Future.delayed(Duration(milliseconds: 100));
@@ -446,7 +446,8 @@ void main() {
       // The state should reach Disconnected, and start() should throw.
 
       mockConnection = LatencyTestConnection();
-      mockConnection.suppressHandshakeResponse = true; // Handshake won't complete
+      mockConnection.suppressHandshakeResponse =
+          true; // Handshake won't complete
 
       final hubConnection = HubConnection(
         mockConnection,
@@ -570,7 +571,8 @@ void main() {
 
       // If we get here, check it was fast (handshake timeout, not server timeout)
       expect(stopwatch.elapsedMilliseconds, lessThan(16000),
-          reason: 'Handshake should timeout at ~15s (dedicated handshakeTimeout), '
+          reason:
+              'Handshake should timeout at ~15s (dedicated handshakeTimeout), '
               'not ${stopwatch.elapsedMilliseconds}ms. The Dart client has no '
               'handshakeTimeoutInMilliseconds property — it relies on the full '
               '30s serverTimeout, doubling the wait time vs C#/Java clients.');
@@ -667,7 +669,8 @@ void main() {
       // If stop() is called during a reconnect delay, the delay continues
       // running and may start a new connection attempt after stop() completes.
 
-      final retryPolicy = AlwaysRetryPolicy(delayMs: 2000); // 2s between retries
+      final retryPolicy =
+          AlwaysRetryPolicy(delayMs: 2000); // 2s between retries
       final connection = LatencyTestConnection();
       final hub = HubConnection(
         connection,
@@ -701,7 +704,8 @@ void main() {
 
       // After stop, no more connection attempts should happen
       final startCountAfterStop = connection.startCallCount;
-      await Future.delayed(Duration(milliseconds: 2500)); // Wait past the retry delay
+      await Future.delayed(
+          Duration(milliseconds: 2500)); // Wait past the retry delay
       expect(connection.startCallCount, equals(startCountAfterStop),
           reason: 'After stop(), no more reconnect attempts should occur. '
               'But an uncancelled Future.delayed may trigger another attempt.');

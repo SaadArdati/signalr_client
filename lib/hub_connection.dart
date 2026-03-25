@@ -250,9 +250,7 @@ class HubConnection {
     // TS client: 100s default — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/ts/signalr/src/HttpConnection.ts#L84
     // C# client: CancellationToken propagation — https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L1511
     try {
-      await _connection
-          .start(transferFormat: _protocol.transferFormat)
-          .timeout(
+      await _connection.start(transferFormat: _protocol.transferFormat).timeout(
         Duration(milliseconds: connectTimeoutInMilliseconds),
         onTimeout: () {
           throw TimeoutException(
@@ -639,7 +637,8 @@ class HubConnection {
   /// Returns true if the connection is healthy (received any response),
   /// false if the ping failed to send or no response was received within the timeout.
   ///
-  Future<bool> checkHealth({Duration timeout = const Duration(seconds: 2)}) async {
+  Future<bool> checkHealth(
+      {Duration timeout = const Duration(seconds: 2)}) async {
     if (_connectionState != HubConnectionState.Connected) {
       _logger?.finer("checkHealth: Not connected, returning false");
       return false;
@@ -795,9 +794,8 @@ class HubConnection {
     // TS client uses setTimeout (one-shot): https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/ts/signalr/src/HubConnection.ts#L722
     // C# client uses 1s polling timer: https://github.com/dotnet/aspnetcore/blob/main/src/SignalR/clients/csharp/Client.Core/src/HubConnection.cs#L164
     _cleanupPingTimer();
-    _pingServerTimer =
-        Timer(Duration(milliseconds: keepAliveIntervalInMilliseconds),
-            () async {
+    _pingServerTimer = Timer(
+        Duration(milliseconds: keepAliveIntervalInMilliseconds), () async {
       if (_connectionState == HubConnectionState.Connected) {
         try {
           await _sendMessage(_cachedPingMessage);
